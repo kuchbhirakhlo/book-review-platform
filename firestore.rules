@@ -1,0 +1,167 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                    HELPER FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+
+    function getUserRole() {
+      return isAuthenticated() ? getUserData(request.auth.uid).role : null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    function isEditor() {
+      return isAuthenticated() && getUserRole() == 'editor';
+    }
+
+    function isStaff() {
+      return isAuthenticated() && 
+             (getUserRole() == 'admin' || getUserRole() == 'editor');
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasValidPostFields() {
+      let data = request.resource.data;
+      return data.title is string
+          && data.title.size() >= 3
+          && data.slug is string
+          && data.slug.size() >= 3
+          && data.excerpt is string
+          && data.excerpt.size() >= 10
+          && data.excerpt.size() <= 300
+          && data.content is string
+          && data.content.size() >= 50
+          && data.bookTitle is string
+          && data.bookTitle.size() >= 1
+          && data.authorName is string
+          && data.authorName.size() >= 2
+          && data.genre is list
+          && data.genre.size() >= 1
+          && data.genre.size() <= 5
+          && data.rating is number // Changed to number to support float/int
+          && data.rating >= 1
+          && data.rating <= 5
+          && data.status in ['draft', 'review', 'published']
+          && data.authorId is string
+          && data.authorRole in ['admin', 'editor'];
+    }
+
+    function hasValidStatusTransition() {
+      let newStatus = request.resource.data.status;
+      let currentUserRole = getUserRole();
+      
+      if (currentUserRole == 'editor') {
+        return newStatus in ['draft', 'review'];
+      }
+      return newStatus in ['draft', 'review', 'published'];
+    }
+
+    function hasValidRole() {
+      return request.resource.data.role in ['admin', 'editor'];
+    }
+
+    function hasValidTimestamps(hasCreated, hasUpdated) {
+      if (hasCreated) {
+        return request.resource.data.createdAt is timestamp;
+      }
+      if (hasUpdated) {
+        return request.resource.data.updatedAt is timestamp;
+      }
+      return true;
+    }
+
+    function isRoleEscalationAttempt() {
+      return request.resource.data.role == 'admin' && 
+             getUserRole() != 'admin';
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                         USERS COLLECTION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    match /users/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      
+      allow create: if isAdmin()
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() >= 2
+                    && request.resource.data.email is string
+                    && request.resource.data.email.size() >= 5
+                    && hasValidRole()
+                    && request.resource.data.isActive == true
+                    && request.resource.data.createdAt is timestamp;
+      
+      allow update: if isAdmin()
+                    && (!request.resource.data.keys().hasAll(['role']) 
+                        || !isRoleEscalationAttempt());
+      
+      allow delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                         POSTS COLLECTION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    match /posts/{postId} {
+      allow read: if resource != null 
+                  && (
+                    (resource.data.status == 'published')
+                    || isStaff()
+                  );
+      
+      allow create: if isStaff()
+                    && isOwner(request.resource.data.authorId)
+                    && hasValidPostFields()
+                    && hasValidTimestamps(true, false)
+                    && hasValidStatusTransition();
+      
+      allow update: if (isAdmin() || (isEditor() && isOwner(resource.data.authorId)))
+                    && hasValidPostFields()
+                    && hasValidTimestamps(false, true)
+                    && hasValidStatusTransition()
+                    && request.resource.data.authorId == resource.data.authorId
+                    && (!request.resource.data.keys().hasAll(['authorRole']) 
+                        || request.resource.data.authorRole == resource.data.authorRole);
+      
+      allow delete: if isAdmin() || (isEditor() && isOwner(resource.data.authorId));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                    COMMENTS COLLECTION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    match /comments/{commentId} {
+      allow read: if false; // Feature disabled
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //                    FAVORITES COLLECTION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    match /favorites/{userId} {
+      allow read, write: if isOwner(userId) && isAuthenticated();
+    }
+
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
